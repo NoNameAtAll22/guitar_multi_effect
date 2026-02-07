@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "nvs_manager.h" // For NVS persistence
 
 /* --- GLOBAL OBJECTS --- */
 static lv_obj_t *scr_status;
@@ -34,36 +35,6 @@ static lv_style_t style_knob_arc;
 static lv_style_t style_list_btn;
 
 /* --- DATA MODELS --- */
-typedef enum {
-    FX_DISTORTION,
-    FX_OVERDRIVE,
-    FX_FUZZ,
-    FX_GAIN,
-    FX_COMPRESSOR,
-    FX_CHORUS,
-    FX_FLANGER,
-    FX_DELAY,
-    FX_ECHO,
-    FX_REVERB,
-    FX_EQ_3BAND,
-    FX_EQ_8BAND,
-    FX_NONE
-} effect_type_t;
-
-typedef struct {
-    effect_type_t type;
-    char name[32];
-} effect_item_t;
-
-#define MAX_PRESETS 30
-#define MAX_EFFECTS 8 
-
-typedef struct {
-    char name[32];
-    effect_item_t effects[MAX_EFFECTS];
-    int effect_count;
-    bool active;
-} preset_t;
 
 static preset_t presets[MAX_PRESETS];
 static int preset_count = 0;
@@ -79,12 +50,19 @@ static void create_scr_editor(void);
 static void create_scr_add_select(void);
 static void build_knobs_for_effect(effect_type_t type);
 static void rebuild_chain_list_ui(void);
+
+typedef struct {
+    effect_item_t *effect;
+    uint8_t param_idx;
+    lv_obj_t *val_lbl; // Pointer to the value label
+} knob_user_data_t;
 static void init_dummy_data(void);
 static void chain_gesture_cb(lv_event_t *e); // New prototype
 static void create_scr_name_select(void); // New prototype
 static void btn_select_name_cb(lv_event_t *e);
 static void cancel_name_select_cb(lv_event_t *e);
 static void btn_del_preset_cb(lv_event_t *e);
+static void knob_del_cb(lv_event_t *e); // New prototype for cleanup
 
 /* ================= HELPER UI FUNCTIONS ================= */
 
@@ -103,6 +81,7 @@ static void update_status_ui(void) {
 void ui_toggle_active_state(void) {
     presets[current_preset_idx].active = !presets[current_preset_idx].active;
     update_status_ui();
+    nvs_manager_save_presets(presets, preset_count); // Save to NVS
 }
 
 static const char* get_list_btn_text(lv_obj_t *btn) {
@@ -185,6 +164,7 @@ static void btn_select_effect_cb(lv_event_t *e) {
     snprintf(presets[current_preset_idx].effects[idx].name, 32, "%s", txt);
     presets[current_preset_idx].effect_count++;
     rebuild_chain_list_ui();
+    nvs_manager_save_presets(presets, preset_count); // Save to NVS
     lv_scr_load_anim(scr_chain, LV_SCR_LOAD_ANIM_MOVE_BOTTOM, 200, 0, false);
 }
 
@@ -203,14 +183,35 @@ static void editor_del_cb(lv_event_t *e) {
         }
         presets[current_preset_idx].effect_count--;
         rebuild_chain_list_ui();
+        nvs_manager_save_presets(presets, preset_count); // Save to NVS
         lv_scr_load_anim(scr_chain, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     }
 }
 
+static void knob_del_cb(lv_event_t *e); // New prototype for cleanup
+
 static void knob_event_cb(lv_event_t *e) {
     lv_obj_t *arc = lv_event_get_target(e);
-    lv_obj_t *label = (lv_obj_t*)lv_event_get_user_data(e);
-    if(label) lv_label_set_text_fmt(label, "%d", (int)lv_arc_get_value(arc));
+    knob_user_data_t *user_data = (knob_user_data_t*)lv_event_get_user_data(e);
+    
+    if (user_data && user_data->effect && user_data->param_idx < MAX_EFFECT_PARAMS) {
+        // Update the effect parameter
+        user_data->effect->params[user_data->param_idx] = lv_arc_get_value(arc);
+        
+        // Update the label
+        if(user_data->val_lbl) {
+            lv_label_set_text_fmt(user_data->val_lbl, "%d", (int)lv_arc_get_value(arc));
+        }
+        // Save presets after parameter change
+        nvs_manager_save_presets(presets, preset_count);
+    }
+}
+
+static void knob_del_cb(lv_event_t *e) {
+    knob_user_data_t *user_data = (knob_user_data_t*)lv_event_get_user_data(e);
+    if (user_data) {
+        free(user_data);
+    }
 }
 
 /* ================= LOGIC & DUMMY DATA ================= */
@@ -223,8 +224,31 @@ static void init_dummy_data(void) {
         presets[i].active = false;
         presets[i].effect_count = 0;
         if(i==0) { 
-            presets[i].effects[0] = (effect_item_t){FX_CHORUS, "Chorus"};
-            presets[i].effects[1] = (effect_item_t){FX_REVERB, "Reverb"};
+            presets[i].effects[0] = (effect_item_t){
+                .type = FX_CHORUS,
+                .name = "Chorus",
+                .params = {0}, // Initialize all params to 0
+                .param_count = 0
+            };
+            // Now, set specific values
+            presets[i].effects[0].params[0] = 30; // Rate
+            presets[i].effects[0].params[1] = 50; // Depth
+            presets[i].effects[0].params[2] = 50; // Tone
+            presets[i].effects[0].params[3] = 50; // Mix
+            presets[i].effects[0].param_count = 4;
+
+            presets[i].effects[1] = (effect_item_t){
+                .type = FX_REVERB,
+                .name = "Reverb",
+                .params = {0},
+                .param_count = 0
+            };
+            // Now, set specific values
+            presets[i].effects[1].params[0] = 70; // Decay
+            presets[i].effects[1].params[1] = 40; // Damp
+            presets[i].effects[1].params[2] = 20; // PreDly
+            presets[i].effects[1].params[3] = 50; // Mix
+            presets[i].effects[1].param_count = 4;
             presets[i].effect_count = 2;
         }
     }
@@ -241,7 +265,7 @@ static void rebuild_chain_list_ui(void) {
 
 /* ================= UI BUILDERS ================= */
 
-static lv_obj_t* create_knob(lv_obj_t *parent, const char *title, int32_t val, int32_t min, int32_t max) {
+static lv_obj_t* create_knob(lv_obj_t *parent, const char *title, int32_t val, int32_t min, int32_t max, effect_item_t *effect, uint8_t param_idx) {
     lv_obj_t *cont = lv_obj_create(parent);
     lv_obj_set_size(cont, 80, 100);
     lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
@@ -273,18 +297,28 @@ static lv_obj_t* create_knob(lv_obj_t *parent, const char *title, int32_t val, i
     lv_obj_set_style_text_color(val_lbl, lv_color_white(), 0);
     lv_obj_center(val_lbl);
 
-    lv_obj_add_event_cb(arc, knob_event_cb, LV_EVENT_VALUE_CHANGED, val_lbl);
+    knob_user_data_t *user_data = malloc(sizeof(knob_user_data_t));
+    if (user_data == NULL) return NULL; // Handle allocation error
+    user_data->effect = effect;
+    user_data->param_idx = param_idx;
+    user_data->val_lbl = val_lbl; // Store pointer to label
+
+    lv_obj_add_event_cb(arc, knob_event_cb, LV_EVENT_VALUE_CHANGED, user_data);
+    lv_obj_add_event_cb(arc, knob_del_cb, LV_EVENT_DELETE, user_data); // Add delete handler for cleanup
     return cont;
 }
 
 static void build_knobs_for_effect(effect_type_t type) {
     lv_obj_clean(editor_container);
+    effect_item_t *current_effect = &presets[current_preset_idx].effects[current_effect_idx];
+    
     if (type == FX_EQ_8BAND) {
         lv_obj_set_flex_flow(editor_container, LV_FLEX_FLOW_ROW);
         /* Use SPACE_BETWEEN for better separation */
         lv_obj_set_flex_align(editor_container, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         /* 8 bands */
         const char *freqs[] = {"63", "125", "250", "500", "1k", "2k", "4k", "8k"};
+        current_effect->param_count = 0; // Reset count
         for(int i=0; i<8; i++) {
             lv_obj_t *sub = lv_obj_create(editor_container);
             /* Slightly wider container to prevent overlap */
@@ -297,9 +331,20 @@ static void build_knobs_for_effect(effect_type_t type) {
 
             lv_obj_t *slider = lv_slider_create(sub);
             lv_obj_set_size(slider, 8, 140);
+            // Default range for EQ bands, and read current value from params
+            int32_t val = (current_effect->param_count < MAX_EFFECT_PARAMS) ? current_effect->params[current_effect->param_count] : 0;
             lv_slider_set_range(slider, -12, 12);
-            lv_slider_set_value(slider, 0, LV_ANIM_OFF);
+            lv_slider_set_value(slider, val, LV_ANIM_OFF);
             lv_obj_center(slider);
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) {
+                // For sliders, pass a custom user data to update the param and the UI.
+                // This is a more complex scenario. For simplicity, let's just make the slider set the param.
+                // And the current slider has no label to update.
+                // TODO: Implement proper slider event handling and persistence if needed.
+                current_effect->params[current_effect->param_count] = val; // Store default or loaded val
+                current_effect->param_count++;
+            }
+
 
             lv_obj_t *l = lv_label_create(sub);
             lv_label_set_text(l, freqs[i]);
@@ -315,21 +360,83 @@ static void build_knobs_for_effect(effect_type_t type) {
         
         /* Mix knob is standard for almost all effects */
         bool has_mix = true;
+        current_effect->param_count = 0; // Reset count for new effect type
 
-        if(type == FX_DISTORTION) { create_knob(editor_container, "Gain", 80, 0, 100); create_knob(editor_container, "Tone", 50, 0, 100); create_knob(editor_container, "Level", 60, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Distortion"); }
-        else if(type == FX_OVERDRIVE) { create_knob(editor_container, "Drive", 60, 0, 100); create_knob(editor_container, "Tone", 50, 0, 100); create_knob(editor_container, "Level", 70, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Overdrive"); }
-        else if(type == FX_FUZZ) { create_knob(editor_container, "Fuzz", 90, 0, 100); create_knob(editor_container, "Tone", 40, 0, 100); create_knob(editor_container, "Vol", 60, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Fuzz"); }
-        else if(type == FX_GAIN) { create_knob(editor_container, "Gain", 10, 0, 30); create_knob(editor_container, "Bass", 0, -12, 12); create_knob(editor_container, "Treb", 0, -12, 12); has_mix = false; lv_label_set_text(editor_label, "Boost / Gain"); }
-        else if(type == FX_COMPRESSOR) { create_knob(editor_container, "Sustain", 50, 0, 100); create_knob(editor_container, "Attack", 20, 0, 100); create_knob(editor_container, "Level", 50, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Compressor"); }
-        else if(type == FX_CHORUS) { create_knob(editor_container, "Rate", 30, 0, 100); create_knob(editor_container, "Depth", 50, 0, 100); create_knob(editor_container, "Tone", 50, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Chorus"); }
-        else if(type == FX_FLANGER) { create_knob(editor_container, "Rate", 20, 0, 100); create_knob(editor_container, "Depth", 60, 0, 100); create_knob(editor_container, "Res", 40, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Flanger"); }
-        else if(type == FX_DELAY) { create_knob(editor_container, "Time", 400, 0, 1000); create_knob(editor_container, "Fdbk", 40, 0, 100); create_knob(editor_container, "Tone", 50, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Delay"); }
-        else if(type == FX_ECHO) { create_knob(editor_container, "Time", 200, 0, 500); create_knob(editor_container, "Fdbk", 30, 0, 100); create_knob(editor_container, "Wow", 10, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Tape Echo"); }
-        else if(type == FX_REVERB) { create_knob(editor_container, "Decay", 70, 0, 100); create_knob(editor_container, "Damp", 40, 0, 100); create_knob(editor_container, "PreDly", 20, 0, 200); has_mix = true; lv_label_set_text(editor_label, "Reverb"); }
-        else if(type == FX_EQ_3BAND) { create_knob(editor_container, "Bass", 0, -12, 12); create_knob(editor_container, "Mid", 0, -12, 12); create_knob(editor_container, "Treb", 0, -12, 12); create_knob(editor_container, "Vol", 0, -12, 12); has_mix = false; lv_label_set_text(editor_label, "3-Band EQ"); }
-        else { create_knob(editor_container, "Param 1", 50, 0, 100); has_mix = true; lv_label_set_text(editor_label, "Effect"); }
+        if(type == FX_DISTORTION) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Gain", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Tone", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Level", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Distortion"); 
+        }
+        else if(type == FX_OVERDRIVE) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Drive", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Tone", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Level", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Overdrive"); 
+        }
+        else if(type == FX_FUZZ) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Fuzz", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Tone", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Vol", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Fuzz"); 
+        }
+        else if(type == FX_GAIN) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Gain", current_effect->params[current_effect->param_count], 0, 30, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Bass", current_effect->params[current_effect->param_count], -12, 12, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Treb", current_effect->params[current_effect->param_count], -12, 12, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = false; lv_label_set_text(editor_label, "Boost / Gain"); 
+        }
+        else if(type == FX_COMPRESSOR) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Sustain", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Attack", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Level", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Compressor"); 
+        }
+        else if(type == FX_CHORUS) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Rate", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Depth", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Tone", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Chorus"); 
+        }
+        else if(type == FX_FLANGER) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Rate", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Depth", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Res", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Flanger"); 
+        }
+        else if(type == FX_DELAY) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Time", current_effect->params[current_effect->param_count], 0, 1000, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Fdbk", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Tone", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Delay"); 
+        }
+        else if(type == FX_ECHO) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Time", current_effect->params[current_effect->param_count], 0, 500, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Fdbk", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Wow", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Tape Echo"); 
+        }
+        else if(type == FX_REVERB) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Decay", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Damp", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "PreDly", current_effect->params[current_effect->param_count], 0, 200, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Reverb"); 
+        }
+        else if(type == FX_EQ_3BAND) { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Bass", current_effect->params[current_effect->param_count], -12, 12, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Mid", current_effect->params[current_effect->param_count], -12, 12, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Treb", current_effect->params[current_effect->param_count], -12, 12, current_effect, current_effect->param_count); current_effect->param_count++; }
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Vol", current_effect->params[current_effect->param_count], -12, 12, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = false; lv_label_set_text(editor_label, "3-Band EQ"); 
+        }
+        else { 
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Param 1", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+            has_mix = true; lv_label_set_text(editor_label, "Effect"); 
+        }
 
-        if(has_mix) create_knob(editor_container, "Mix", 50, 0, 100);
+        if(has_mix) {
+            if (current_effect->param_count < MAX_EFFECT_PARAMS) { create_knob(editor_container, "Mix", current_effect->params[current_effect->param_count], 0, 100, current_effect, current_effect->param_count); current_effect->param_count++; }
+        }
     }
 }
 
@@ -370,12 +477,6 @@ static void create_scr_list(void) {
     lv_obj_align(library_list, LV_ALIGN_TOP_MID, 0, 10);
     lv_obj_set_style_bg_color(library_list, lv_color_hex(0x101010), 0);
     lv_obj_set_style_border_width(library_list, 0, 0);
-    for(int i=0; i<preset_count; i++) {
-        lv_obj_t *btn = lv_list_add_btn(library_list, LV_SYMBOL_AUDIO, presets[i].name);
-        lv_obj_add_style(btn, &style_list_btn, 0);
-        lv_obj_add_event_cb(btn, list_item_clicked_cb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)i);
-        lv_obj_add_event_cb(btn, list_item_clicked_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
-    }
     lv_obj_t *btn_add = lv_button_create(scr_list);
     lv_obj_set_size(btn_add, 220, 45);
     lv_obj_align(btn_add, LV_ALIGN_BOTTOM_MID, 0, -5);
@@ -449,7 +550,7 @@ static void btn_del_preset_cb(lv_event_t *e) {
         lv_obj_add_event_cb(btn, list_item_clicked_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
     }
     update_status_ui(); // Update status for the new current preset
-
+    nvs_manager_save_presets(presets, preset_count); // Save to NVS
     // Load scr_list with animation
     lv_scr_load_anim(scr_list, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
 }
@@ -520,13 +621,47 @@ static void create_scr_add_select(void) {
 }
 
 void ui_app_init(void) {
-    init_dummy_data();
+    // Initialize all UI screens first
     create_scr_status();
     create_scr_list();
     create_scr_chain();
     create_scr_editor();
     create_scr_add_select();
-    create_scr_name_select(); // New screen initialization
+    create_scr_name_select();
+
+    // Attempt to load presets from NVS
+    esp_err_t err = nvs_manager_load_presets(presets, &preset_count);
+    if (err != ESP_OK || preset_count == 0) {
+        // If loading failed or no presets found, initialize dummy data
+        init_dummy_data();
+        // Save the dummy data to NVS for future boots
+        nvs_manager_save_presets(presets, preset_count);
+    }
+    
+    // Rebuild library_list on scr_list to show loaded/dummy presets
+    // lv_obj_clean is done in create_scr_list, but we need to re-add buttons if loaded.
+    // If create_scr_list already added dummy data, we need to clean and re-add actual data.
+    // A better approach is to not populate create_scr_list with any data, and do it here.
+    // For now, let's assume create_scr_list adds dummy data and we immediately clean it.
+    lv_obj_clean(library_list); // Clear initial buttons (if any from init_dummy_data in create_scr_list)
+    for(int i=0; i<preset_count; i++) {
+        lv_obj_t *btn = lv_list_add_btn(library_list, LV_SYMBOL_AUDIO, presets[i].name);
+        lv_obj_add_style(btn, &style_list_btn, 0);
+        lv_obj_add_event_cb(btn, list_item_clicked_cb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(btn, list_item_clicked_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
+    }
+
+    current_preset_idx = 0; // Start with the first preset (or what was loaded)
+    previous_active_preset_idx = 0; // Ensure consistency
+    if (preset_count > 0 && presets[current_preset_idx].active == false) {
+        // If first preset is inactive, ensure style is correct.
+        // This is important because update_status_ui will be called before lv_scr_load.
+        // If loaded first preset is inactive, it would show red.
+        // But the init_dummy_data sets first preset inactive to false,
+        // so its border color needs to be set to style_active by update_status_ui.
+        // This should be automatically handled by update_status_ui.
+    }
+
     update_status_ui();
     lv_scr_load(scr_status);
 }
@@ -589,7 +724,7 @@ static void btn_select_name_cb(lv_event_t *e) {
     lv_obj_add_event_cb(btn, list_item_clicked_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)preset_count);
     preset_count++;
     lv_obj_scroll_to_view(btn, LV_ANIM_ON);
-
+    nvs_manager_save_presets(presets, preset_count); // Save to NVS
     lv_scr_load_anim(scr_list, LV_SCR_LOAD_ANIM_MOVE_BOTTOM, 200, 0, false); // Go back to preset list
 }
 

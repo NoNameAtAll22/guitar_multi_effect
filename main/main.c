@@ -9,6 +9,8 @@
 #include "lvgl_adapter.h" // LVGL Adapter
 #include "ui_app.h"       // UI Application
 #include "lvgl.h"
+#include "nvs_flash.h"      // For NVS flash initialization
+#include "nvs_manager.h" // For NVS manager
 
 #define TAG "MAIN"
 
@@ -31,7 +33,7 @@ static void lvgl_task(void *pvParameter) {
 #include "rom/ets_sys.h"    // For ets_delay_us
 
 // Forward declaration for ISR
-static void IRAM_ATTR button_isr_handler(void *arg);
+static void button_isr_handler(void *arg);
 
 // Queue for button events
 typedef enum {
@@ -162,6 +164,15 @@ static void IRAM_ATTR button_isr_handler(void *arg) {
 
 void app_main(void)
 {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    nvs_manager_init(); // Initialize NVS manager
+
     ESP_LOGI(TAG, "App Start - Display Test");
 
     // Initialize board components (SPI bus, display, etc.)
