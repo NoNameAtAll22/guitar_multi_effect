@@ -4,6 +4,10 @@
 #include <string.h>
 #include "nvs_manager.h" // For NVS persistence
 #include "effect_type.h"
+#include "audio_fx.h"
+
+static bool presets_dirty = false;
+
 
 /* --- GLOBAL OBJECTS --- */
 static lv_obj_t *scr_status;
@@ -42,6 +46,8 @@ static int preset_count = 0;
 static int current_preset_idx = 0;
 static int previous_active_preset_idx = 0; // New variable
 static int current_effect_idx = -1; 
+static int g_active_preset_idx = -1;
+
 
 /* --- PROTOTYPES --- */
 static void create_scr_status(void);
@@ -51,21 +57,44 @@ static void create_scr_editor(void);
 static void create_scr_add_select(void);
 static void build_knobs_for_effect(effect_type_t type);
 static void rebuild_chain_list_ui(void);
+static void update_status_ui(void);
 
-typedef struct {
-    effect_item_t *effect;
-    uint8_t param_idx;
-    lv_obj_t *val_lbl; // Pointer to the value label
-} knob_user_data_t;
+
+
 static void init_dummy_data(void);
 static void chain_gesture_cb(lv_event_t *e); // New prototype
 static void create_scr_name_select(void); // New prototype
 static void btn_select_name_cb(lv_event_t *e);
 static void cancel_name_select_cb(lv_event_t *e);
 static void btn_del_preset_cb(lv_event_t *e);
-static void knob_del_cb(lv_event_t *e); // New prototype for cleanup
+static void ui_apply_preset_to_audio(void);
 
 /* ================= HELPER UI FUNCTIONS ================= */
+
+static void ui_activate_preset(int idx)
+{
+    if (idx < 0 || idx >= preset_count)
+        return;
+
+    // wyłącz poprzedni
+    if (g_active_preset_idx >= 0 &&
+        g_active_preset_idx < preset_count) {
+
+        presets[g_active_preset_idx].active = false;
+    }
+
+    // włącz nowy
+    g_active_preset_idx = idx;
+    current_preset_idx  = idx;
+    presets[idx].active = true;
+
+    ui_apply_preset_to_audio();
+    update_status_ui();
+    presets_dirty = true;
+
+}
+
+
 
 static void update_status_ui(void) {
     bool is_active = presets[current_preset_idx].active;
@@ -79,11 +108,91 @@ static void update_status_ui(void) {
     if (status_label) lv_label_set_text(status_label, presets[current_preset_idx].name);
 }
 
-void ui_toggle_active_state(void) {
-    presets[current_preset_idx].active = !presets[current_preset_idx].active;
+void ui_toggle_active_state(void)
+{
+    if (g_active_preset_idx == current_preset_idx) {
+        /* WYŁĄCZ → BYPASS */
+        presets[current_preset_idx].active = false;
+        g_active_preset_idx = -1;
+
+        if (xSemaphoreTake(g_audio_params_mutex, portMAX_DELAY)) {
+            audio_fx_get_chain()->chain_len = 0;
+            audio_fx_set_chain_target_len(0);
+            xSemaphoreGive(g_audio_params_mutex);
+        }
+    } else {
+        /* WŁĄCZ TEN PRESET */
+        ui_activate_preset(current_preset_idx);
+        return;
+    }
+
     update_status_ui();
-    nvs_manager_save_presets(presets, preset_count); // Save to NVS
+    presets_dirty = true;
+
 }
+
+
+static void ui_apply_preset_to_audio(void)
+{
+    if (!xSemaphoreTake(g_audio_params_mutex, portMAX_DELAY))
+        return;
+
+    audio_fx_chain_t *chain = audio_fx_get_chain();
+    audio_fx_params_t *p    = audio_fx_get_params();
+
+    /* BYPASS */
+    if (g_active_preset_idx < 0) {
+        chain->chain_len = 0;
+        audio_fx_set_chain_target_len(0);
+        xSemaphoreGive(g_audio_params_mutex);
+        return;
+    }
+
+    preset_t *pr = &presets[g_active_preset_idx];
+
+    chain->chain_len = 0;
+    audio_fx_set_chain_target_len(pr->effect_count);
+
+    for (int i = 0; i < pr->effect_count; i++) {
+        effect_item_t *e = &pr->effects[i];
+
+        chain->chain[i].type   = e->type;
+        chain->chain[i].active = true;
+        chain->chain_len++;
+
+        switch (e->type) {
+            case FX_DISTORTION:  p->dist_drive = e->params[0] / 100.0f; break;
+            case FX_OVERDRIVE:   p->od_drive   = e->params[0] / 100.0f; break;
+            case FX_FUZZ:        p->fuzz_drive = e->params[0] / 100.0f; break;
+            case FX_GAIN:        p->gain_db    = e->params[0]; break;
+            case FX_COMPRESSOR:  p->comp_amount= e->params[0] / 100.0f; break;
+            case FX_CHORUS:
+                p->ch_rate  = e->params[0] / 100.0f;
+                p->ch_depth = e->params[1] / 100.0f;
+                p->ch_mix   = e->params[3] / 100.0f;
+                break;
+            case FX_EQ_3BAND:
+                p->eq3_bass = e->params[0];
+                p->eq3_mid  = e->params[1];
+                p->eq3_treb = e->params[2];
+                p->eq3_vol  = e->params[3];
+                break;
+            default:
+                break;
+        }
+
+        if (e->type == FX_EQ_8BAND) {
+            for (int b = 0; b < 8; b++)
+                audio_fx_set_eq8_band(b, e->params[b]);
+        }
+    }
+
+    xSemaphoreGive(g_audio_params_mutex);
+}
+
+
+
+
 
 static const char* get_list_btn_text(lv_obj_t *btn) {
     uint32_t count = lv_obj_get_child_count(btn);
@@ -113,27 +222,49 @@ static void list_gesture_cb(lv_event_t *e) {
     }
 }
 
-static void list_item_clicked_cb(lv_event_t *e) {
+static void list_item_clicked_cb(lv_event_t *e)
+{
     lv_event_code_t code = lv_event_get_code(e);
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
+
     if (code == LV_EVENT_SHORT_CLICKED) {
+
         lv_indev_t *indev = lv_indev_get_act();
         lv_point_t p_diff;
         lv_indev_get_vect(indev, &p_diff);
 
-        // Only process short click if movement was minimal (not a drag/swipe)
-        if (abs(p_diff.x) < CLICK_DRAG_THRESHOLD && abs(p_diff.y) < CLICK_DRAG_THRESHOLD) {
-            current_preset_idx = idx;
-            update_status_ui();
-            lv_scr_load_anim(scr_status, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+        // klik, nie swipe
+        if (abs(p_diff.x) < CLICK_DRAG_THRESHOLD &&
+            abs(p_diff.y) < CLICK_DRAG_THRESHOLD) {
+
+            // 🔥 JEDYNE MIEJSCE AKTYWACJI PRESETU
+            ui_activate_preset(idx);
+
+            lv_scr_load_anim(
+                scr_status,
+                LV_SCR_LOAD_ANIM_MOVE_RIGHT,
+                200, 0, false
+            );
         }
-    } else if (code == LV_EVENT_LONG_PRESSED) {
-        previous_active_preset_idx = current_preset_idx; // Store current active preset
+    }
+    else if (code == LV_EVENT_LONG_PRESSED) {
+
+        // ❗ zapamiętaj AKTYWNY preset
+        previous_active_preset_idx = g_active_preset_idx;
+
+        // ❗ tylko wybór do edycji (bez aktywacji)
         current_preset_idx = idx;
+
         rebuild_chain_list_ui();
-        lv_scr_load_anim(scr_chain, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+
+        lv_scr_load_anim(
+            scr_chain,
+            LV_SCR_LOAD_ANIM_MOVE_LEFT,
+            200, 0, false
+        );
     }
 }
+
 
 static void btn_add_new_preset_cb(lv_event_t *e) {
     if (preset_count >= MAX_PRESETS) return; // Prevent adding if max reached
@@ -173,9 +304,16 @@ static void select_cancel_cb(lv_event_t *e) {
     lv_scr_load_anim(scr_chain, LV_SCR_LOAD_ANIM_MOVE_BOTTOM, 200, 0, false);
 }
 
-static void editor_back_cb(lv_event_t *e) {
+static void editor_back_cb(lv_event_t *e)
+{
+    if (current_preset_idx == g_active_preset_idx &&
+        presets[current_preset_idx].active) {
+        ui_apply_preset_to_audio();
+    }
+
     lv_scr_load_anim(scr_chain, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
 }
+
 
 static void editor_del_cb(lv_event_t *e) {
     if (current_effect_idx >= 0 && current_effect_idx < presets[current_preset_idx].effect_count) {
@@ -189,31 +327,29 @@ static void editor_del_cb(lv_event_t *e) {
     }
 }
 
-static void knob_del_cb(lv_event_t *e); // New prototype for cleanup
-
-static void knob_event_cb(lv_event_t *e) {
+static void knob_event_cb(lv_event_t *e)
+{
     lv_obj_t *arc = lv_event_get_target(e);
-    knob_user_data_t *user_data = (knob_user_data_t*)lv_event_get_user_data(e);
-    
-    if (user_data && user_data->effect && user_data->param_idx < MAX_EFFECT_PARAMS) {
-        // Update the effect parameter
-        user_data->effect->params[user_data->param_idx] = lv_arc_get_value(arc);
-        
-        // Update the label
-        if(user_data->val_lbl) {
-            lv_label_set_text_fmt(user_data->val_lbl, "%d", (int)lv_arc_get_value(arc));
-        }
-        // Save presets after parameter change
-        nvs_manager_save_presets(presets, preset_count);
+    knob_user_data_t *ud = lv_event_get_user_data(e);
+    if (!ud || !ud->effect) return;
+
+    int v = lv_arc_get_value(arc);
+    ud->effect->params[ud->param_idx] = v;
+
+    if (ud->val_lbl)
+        lv_label_set_text_fmt(ud->val_lbl, "%d", v);
+
+    nvs_manager_save_presets(presets, preset_count);
+
+    /* 🔥 AUDIO TYLKO JEŚLI EDYTUJESZ AKTYWNY PRESET */
+    if (current_preset_idx == g_active_preset_idx &&
+        presets[current_preset_idx].active) {
+        ui_apply_preset_to_audio();
     }
 }
 
-static void knob_del_cb(lv_event_t *e) {
-    knob_user_data_t *user_data = (knob_user_data_t*)lv_event_get_user_data(e);
-    if (user_data) {
-        free(user_data);
-    }
-}
+
+
 
 /* ================= LOGIC & DUMMY DATA ================= */
 
@@ -298,16 +434,38 @@ static lv_obj_t* create_knob(lv_obj_t *parent, const char *title, int32_t val, i
     lv_obj_set_style_text_color(val_lbl, lv_color_white(), 0);
     lv_obj_center(val_lbl);
 
-    knob_user_data_t *user_data = malloc(sizeof(knob_user_data_t));
+    knob_user_data_t *user_data = &effect->knob_ud[param_idx];
     if (user_data == NULL) return NULL; // Handle allocation error
     user_data->effect = effect;
     user_data->param_idx = param_idx;
     user_data->val_lbl = val_lbl; // Store pointer to label
 
     lv_obj_add_event_cb(arc, knob_event_cb, LV_EVENT_VALUE_CHANGED, user_data);
-    lv_obj_add_event_cb(arc, knob_del_cb, LV_EVENT_DELETE, user_data); // Add delete handler for cleanup
     return cont;
 }
+
+static void eq8_slider_cb(lv_event_t *e)
+{
+    if (current_preset_idx != g_active_preset_idx)
+        return;
+
+    if (!presets[current_preset_idx].active)
+        return;
+
+    effect_item_t *effect = lv_event_get_user_data(e);
+    if (!effect) return;
+
+    lv_obj_t *slider = lv_event_get_target(e);
+    int band = lv_obj_get_index(slider);
+
+    if (band < 0 || band >= 8) return;
+
+    effect->params[band] = lv_slider_get_value(slider);
+
+    audio_fx_set_eq8_band(band, effect->params[band]);
+}
+
+
 
 static void build_knobs_for_effect(effect_type_t type) {
     lv_obj_clean(editor_container);
@@ -331,6 +489,7 @@ static void build_knobs_for_effect(effect_type_t type) {
             lv_obj_set_style_pad_gap(sub, 2, 0);
 
             lv_obj_t *slider = lv_slider_create(sub);
+            lv_obj_add_event_cb(slider, eq8_slider_cb, LV_EVENT_VALUE_CHANGED, current_effect);
             lv_obj_set_size(slider, 8, 140);
             // Default range for EQ bands, and read current value from params
             int32_t val = (current_effect->param_count < MAX_EFFECT_PARAMS) ? current_effect->params[current_effect->param_count] : 0;
@@ -665,25 +824,31 @@ void ui_app_init(void) {
 
     update_status_ui();
     lv_scr_load(scr_status);
+    ui_apply_preset_to_audio();
 }
 
-void ui_app_next_preset(void) {
+void ui_app_next_preset(void)
+{
     if (preset_count == 0) return;
-    current_preset_idx++;
-    if (current_preset_idx >= preset_count) {
-        current_preset_idx = 0; // Wrap around to the first preset
-    }
-    update_status_ui();
+
+    int next = current_preset_idx + 1;
+    if (next >= preset_count) next = 0;
+
+    ui_activate_preset(next);
 }
 
-void ui_app_prev_preset(void) {
+
+
+void ui_app_prev_preset(void)
+{
     if (preset_count == 0) return;
-    current_preset_idx--;
-    if (current_preset_idx < 0) {
-        current_preset_idx = preset_count - 1; // Wrap around to the last preset
-    }
-    update_status_ui();
+
+    int prev = current_preset_idx - 1;
+    if (prev < 0) prev = preset_count - 1;
+
+    ui_activate_preset(prev);
 }
+
 
 // New callback function
 static void btn_select_name_cb(lv_event_t *e) {
@@ -760,4 +925,16 @@ static void create_scr_name_select(void) {
     lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_MID, 0, -5);
     lv_obj_add_event_cb(btn_cancel, cancel_name_select_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(btn_cancel); lv_label_set_text(l, "Cancel"); lv_obj_center(l);
+}
+
+void nvs_autosave_task(void *arg)
+{
+    while (1) {
+        if (presets_dirty) {
+            presets_dirty = false;
+            nvs_manager_save_presets(presets, preset_count);
+            //ESP_LOGI("NVS", "Autosave presets");
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }

@@ -89,6 +89,7 @@ audio_fx_chain_t* audio_fx_get_chain(void);
 
 // Mutex to protect audio parameters and chain during access
 extern SemaphoreHandle_t g_audio_params_mutex;
+void audio_fx_set_chain_target_len(int len);
 
 
 #endif // AUDIO_FX_H

@@ -11,6 +11,7 @@
 #include "lvgl.h"
 #include "nvs_flash.h"      // For NVS flash initialization
 #include "nvs_manager.h" // For NVS manager
+#include "esp_sleep.h"
 
 #include "audio_i2s.h"
 #include "audio_fx.h"
@@ -52,10 +53,11 @@ typedef struct {
 } button_event_t;
 
 static QueueHandle_t button_event_queue = NULL;
+static volatile bool g_woke_from_sleep = false;
 
 #define DEBOUNCE_TIME_MS      50
 #define LONG_PRESS_TIME_MS    (BTN_HOLD_MS) // From board_pins.h
-#define CLICK_WINDOW_TIME_MS  250 // Max time between clicks for multi-click detection (reduced for responsiveness)
+#define CLICK_WINDOW_TIME_MS  200 // Max time between clicks for multi-click detection (reduced for responsiveness)
 
 // Internal state for button event task
 typedef enum {
@@ -64,13 +66,49 @@ typedef enum {
     STATE_RELEASED_WAITING_FOR_MULTI_CLICK,
 } button_state_t;
 
+static void enter_light_sleep(void)
+{
+    ESP_LOGW(TAG, "Entering LIGHT sleep");
+
+    // UI off
+    board_toggle_backlight();
+    touch_driver_toggle_enabled();
+
+    // poczekaj aż PUŚCI przycisk (bardzo ważne)
+    while (gpio_get_level(PIN_BTN_CLR) == 1) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // GPIO wake
+    gpio_wakeup_enable(PIN_BTN_CLR, GPIO_INTR_HIGH_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    esp_light_sleep_start();
+
+    // ===== WRACASZ TU PO WYBUDZENIU =====
+    ESP_LOGI(TAG, "Woke up from LIGHT sleep");
+
+    // nie przywracaj UI od razu
+    g_woke_from_sleep = true;
+}
+
+
+
+
+
+
 // --- Button Event Task ---
+static uint64_t last_action_time_ms = 0;
+#define ACTION_COOLDOWN_MS 400
+
 static void button_event_task(void *pvParameter) {
     button_event_t event;
     uint64_t press_start_time_ms = 0;
     uint64_t last_click_time_ms = 0;
     int click_counter = 0;
     bool long_press_handled = false;
+    int wake_click_counter = 0;
+
 
     ESP_LOGI(TAG, "Button Event Task Started (New Logic)");
 
@@ -128,31 +166,87 @@ static void button_event_task(void *pvParameter) {
                     last_click_time_ms = 0;
                 }
             }
-        } else { // xQueueReceive timed out (no event for CLICK_WINDOW_TIME_MS)
-            // Process clicks if any (only if a long press wasn't just handled)
-            if (!long_press_handled && click_counter > 0) {
-                if (click_counter == 1) {
-                    ESP_LOGI(TAG, "Short Press Detected!");
-                    ui_toggle_active_state();
-                } else if (click_counter == 2) {
-                    ESP_LOGI(TAG, "Double Click Detected!");
-                    ui_app_next_preset();
-                } else if (click_counter == 3) {
-                    ESP_LOGI(TAG, "Triple Click Detected!");
-                    ui_app_prev_preset();
-                } else {
-                    ESP_LOGW(TAG, "More than 3 clicks detected, ignoring: %d", click_counter);
-                }
+        } else { // timeout = koniec sekwencji klików
+
+    /* ===== TRYB PO WYBUDZENIU ===== */
+    if (g_woke_from_sleep) {
+
+        // long press = natychmiastowe wybudzenie
+        if (long_press_handled) {
+            ESP_LOGI(TAG, "Wake confirmed (long press)");
+            g_woke_from_sleep = false;
+
+            board_toggle_backlight();
+            touch_driver_toggle_enabled();
+        }
+        // 2 kliknięcia = wybudzenie
+        else if (click_counter >= 2) {
+            ESP_LOGI(TAG, "Wake confirmed (double click)");
+            g_woke_from_sleep = false;
+
+            board_toggle_backlight();
+            touch_driver_toggle_enabled();
+        }
+        // cokolwiek innego ignorujemy
+            else {
+                ESP_LOGI(TAG, "Wake guard: ignoring %d clicks", click_counter);
             }
-            // Reset for next sequence
+
+            // reset
             click_counter = 0;
+            wake_click_counter = 0;
             press_start_time_ms = 0;
             last_click_time_ms = 0;
             long_press_handled = false;
+            continue;
         }
+
+        /* ===== NORMALNY TRYB PRACY ===== */
+        if (!long_press_handled && click_counter > 0) {
+            uint64_t now = esp_timer_get_time() / 1000;
+            if (now - last_action_time_ms < ACTION_COOLDOWN_MS) {
+                click_counter = 0;
+                continue;
+            }
+            last_action_time_ms = now;
+
+            switch (click_counter) {
+
+                case 1:
+                    ESP_LOGI(TAG, "Single Click: FX Toggle");
+                    ui_toggle_active_state();
+                    break;
+
+                case 2:
+                    ESP_LOGI(TAG, "Double Click: Next Preset");
+                    ui_app_next_preset();
+                    break;
+
+                case 3:
+                    ESP_LOGI(TAG, "Triple Click: Previous Preset");
+                    ui_app_prev_preset();
+                    break;
+
+                case 5:
+                    ESP_LOGI(TAG, "Five Clicks: Light Sleep");
+                    enter_light_sleep();
+                    break;
+
+                default:
+                    ESP_LOGW(TAG, "Unhandled click count: %d", click_counter);
+                    break;
+            }
+        }
+
+        // reset normalny
+        click_counter = 0;
+        press_start_time_ms = 0;
+        last_click_time_ms = 0;
+        long_press_handled = false;
+        }
+
     }
 }
-
 // --- ISR Handler ---
 static void IRAM_ATTR button_isr_handler(void *arg) {
     uint32_t gpio_num = (uint32_t)arg;
@@ -169,6 +263,13 @@ static void IRAM_ATTR button_isr_handler(void *arg) {
 
 void app_main(void)
 {
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+    if (cause == ESP_SLEEP_WAKEUP_EXT1) {
+        ESP_LOGI(TAG, "Wakeup from button (EXT1)");
+    }
+
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -219,6 +320,9 @@ void app_main(void)
     xTaskCreatePinnedToCore(button_event_task, "button_event_task", 4096, NULL, 10, NULL, 1);
 
     audio_task_start();
+
+    xTaskCreate(nvs_autosave_task, "nvs_autosave", 4096, NULL, 2, NULL);
+
 
     // Main application loop (can be used for other tasks or remain empty)
     while (1) {
