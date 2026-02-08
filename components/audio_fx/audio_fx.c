@@ -256,7 +256,9 @@ void audio_fx_process(int32_t *buffer, int frames)
     if (xSemaphoreTake(g_audio_params_mutex, portMAX_DELAY) == pdTRUE) {
         for (int i = 0; i < frames; i++) {
             // Get mono sample from left channel
-            float x = (float)buffer[i * 2] / 2147483648.0f;
+            float x = (float)buffer[i * 2] / 8388608.0f;   // PCM1808 = 24-bit ADC
+            x *= 2.5;   // −12 dB (BEZPIECZNY START)
+
 
             // --- MASTER BYPASS ---
             if (fx_chain.chain_len == 0) {

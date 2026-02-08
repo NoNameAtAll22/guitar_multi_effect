@@ -19,6 +19,14 @@
 #define PIN_TP_CS    36
 #define PIN_TP_IRQ   35
 
+/* ================= ADC/DAC ================*/
+
+#define PIN_BCLK   7
+#define PIN_WS     8
+#define PIN_MCLK   28   
+#define PIN_ADC    30   
+#define PIN_DAC    29  
+
 /* ================= BUTTONS ================= */
 #define PIN_BTN_CLR  50
 #define BTN_HOLD_MS  1000
