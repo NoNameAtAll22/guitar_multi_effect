@@ -1,7 +1,6 @@
 #include "audio_fx.h"
 #include <string.h>
 #include <math.h>
-#include "driver/i2s_std.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
 
@@ -257,7 +256,7 @@ void audio_fx_process(int32_t *buffer, int frames)
         for (int i = 0; i < frames; i++) {
             // Get mono sample from left channel
             float x = (float)buffer[i * 2] / 8388608.0f;   // PCM1808 = 24-bit ADC
-            x *= 2.5;   // −12 dB (BEZPIECZNY START)
+            x *= 0.05;   // −12 dB (BEZPIECZNY START)
 
 
             // --- MASTER BYPASS ---

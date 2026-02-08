@@ -12,6 +12,11 @@
 #include "nvs_flash.h"      // For NVS flash initialization
 #include "nvs_manager.h" // For NVS manager
 
+#include "audio_i2s.h"
+#include "audio_fx.h"
+#include "audio_task.h"
+
+
 #define TAG "MAIN"
 
 /* LVGL Task to handle UI updates */
@@ -182,6 +187,9 @@ void app_main(void)
     touch_driver_init();
     board_init_button(); // Configure button GPIO and interrupt
 
+    audio_i2s_init();
+    audio_fx_init();
+
     // Create button event queue
     button_event_queue = xQueueCreate(10, sizeof(button_event_t));
     if (button_event_queue == NULL) {
@@ -209,6 +217,8 @@ void app_main(void)
 
     // Create a FreeRTOS task for button events
     xTaskCreatePinnedToCore(button_event_task, "button_event_task", 4096, NULL, 10, NULL, 1);
+
+    audio_task_start();
 
     // Main application loop (can be used for other tasks or remain empty)
     while (1) {

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nvs_manager.h" // For NVS persistence
+#include "effect_type.h"
 
 /* --- GLOBAL OBJECTS --- */
 static lv_obj_t *scr_status;

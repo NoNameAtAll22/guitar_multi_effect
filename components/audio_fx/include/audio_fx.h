@@ -5,23 +5,7 @@
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h" // Include for SemaphoreHandle_t
-
-// Enum matching the one in ui_app.c
-typedef enum {
-    FX_DISTORTION,
-    FX_OVERDRIVE,
-    FX_FUZZ,
-    FX_GAIN,
-    FX_COMPRESSOR,
-    FX_CHORUS,
-    FX_FLANGER,
-    FX_DELAY,
-    FX_ECHO,
-    FX_REVERB,
-    FX_EQ_3BAND,
-    FX_EQ_8BAND,
-    FX_NONE
-} effect_type_t;
+#include "effect_type.h"
 
 // A single effect in the chain
 typedef struct {
