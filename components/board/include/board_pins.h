@@ -40,3 +40,5 @@
 /* ================= RESOLUTION ================= */
 #define LCD_H_RES    240
 #define LCD_V_RES    320
+
+#define SHDN_PIN    34

@@ -935,6 +935,6 @@ void nvs_autosave_task(void *arg)
             nvs_manager_save_presets(presets, preset_count);
             //ESP_LOGI("NVS", "Autosave presets");
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(120000));
     }
 }

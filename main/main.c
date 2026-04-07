@@ -80,10 +80,15 @@ static void enter_light_sleep(void)
     }
 
     // GPIO wake
+    // GPIO wake
     gpio_wakeup_enable(PIN_BTN_CLR, GPIO_INTR_HIGH_LEVEL);
     esp_sleep_enable_gpio_wakeup();
 
+    // AUDIO OFF
+    gpio_set_level(SHDN_PIN, 0);
+
     esp_light_sleep_start();
+
 
     // ===== WRACASZ TU PO WYBUDZENIU =====
     ESP_LOGI(TAG, "Woke up from LIGHT sleep");
@@ -176,17 +181,19 @@ static void button_event_task(void *pvParameter) {
             ESP_LOGI(TAG, "Wake confirmed (long press)");
             g_woke_from_sleep = false;
 
+            gpio_set_level(SHDN_PIN, 1);   // AUDIO ON
             board_toggle_backlight();
             touch_driver_toggle_enabled();
         }
-        // 2 kliknięcia = wybudzenie
         else if (click_counter >= 2) {
             ESP_LOGI(TAG, "Wake confirmed (double click)");
             g_woke_from_sleep = false;
 
+            gpio_set_level(SHDN_PIN, 1);   // AUDIO ON
             board_toggle_backlight();
             touch_driver_toggle_enabled();
         }
+
         // cokolwiek innego ignorujemy
             else {
                 ESP_LOGI(TAG, "Wake guard: ignoring %d clicks", click_counter);
@@ -287,6 +294,9 @@ void app_main(void)
     lcd_driver_clear();   // Clear screen to black immediately
     touch_driver_init();
     board_init_button(); // Configure button GPIO and interrupt
+
+    gpio_set_direction(SHDN_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(SHDN_PIN, 1);
 
     audio_i2s_init();
     audio_fx_init();

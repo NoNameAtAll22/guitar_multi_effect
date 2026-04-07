@@ -3,7 +3,6 @@
   "idf.openOcdConfigs": [
     "board/esp32p4-builtin.cfg"
   ],
-  "idf.portWin": "COM7",
   "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.1/",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32p4"
@@ -12,7 +11,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=c:\\Users\\Bartosz\\im_getting_fucked\\build"
+    "--compile-commands-dir=${workspaceFolder}/build"
   ],
   "idf.flashType": "UART"
 }
