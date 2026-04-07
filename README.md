@@ -35,7 +35,7 @@ The design focuses on:
 <h2>Board schematic</h2>
 <img width="1588" height="2086" alt="Schematic" src="https://github.com/user-attachments/assets/9a12207a-9713-43ab-8179-21b97fcd526a" />
 
-<sub>_Note 1: U can use any button as long as it has data output_</sub>
+<sub>_Note 1: Any button can be used as long as it has data output_</sub>
 
 <sub>_Note 2: A monostable button is provided for this project. If you want to use bistable button (latching) change button conditions in main.c_</sub>
 
